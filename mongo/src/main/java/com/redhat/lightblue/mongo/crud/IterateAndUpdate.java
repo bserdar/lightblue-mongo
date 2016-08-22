@@ -32,6 +32,10 @@ import com.mongodb.DBCollection;
 import com.mongodb.DBCursor;
 import com.mongodb.DBObject;
 import com.mongodb.WriteConcern;
+import com.mongodb.BulkWriteError;
+import com.mongodb.BulkWriteException;
+import com.mongodb.BulkWriteOperation;
+import com.mongodb.BulkWriteResult;
 import com.redhat.lightblue.crud.CRUDOperation;
 import com.redhat.lightblue.crud.CRUDOperationContext;
 import com.redhat.lightblue.crud.CRUDUpdateResponse;
@@ -50,14 +54,12 @@ import com.redhat.lightblue.util.Measure;
 
 /**
  * Non-atomic updater that evaluates the query, and updates the documents one by
- * one.
+ * one. This is here mainly for experimentation purposes, it does not perform well.
  */
 public class IterateAndUpdate implements DocUpdater {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(IterateAndUpdate.class);
     private static final Logger METRICS = LoggerFactory.getLogger("metrics."+IterateAndUpdate.class.getName());
-
-    private final int batchSize;
 
     private final JsonNodeFactory nodeFactory;
     private final ConstraintValidator validator;
@@ -67,7 +69,6 @@ public class IterateAndUpdate implements DocUpdater {
     private final Projector projector;
     private final Projector errorProjector;
     private final WriteConcern writeConcern;
-
 
     private final List<DocCtx> docUpdateAttempts = new ArrayList<>();
     private final List<BulkWriteError> docUpdateErrors = new ArrayList<>();
@@ -79,7 +80,7 @@ public class IterateAndUpdate implements DocUpdater {
                             Updater updater,
                             Projector projector,
                             Projector errorProjector,
-                            WriteConcern writeConcern, int batchSize) {
+                            WriteConcern writeConcern) {
         this.nodeFactory = nodeFactory;
         this.validator = validator;
         this.roleEval = roleEval;
@@ -88,7 +89,6 @@ public class IterateAndUpdate implements DocUpdater {
         this.projector = projector;
         this.errorProjector = errorProjector;
         this.writeConcern = writeConcern;
-        this.batchSize = batchSize;
     }
 
     @Override
@@ -113,7 +113,7 @@ public class IterateAndUpdate implements DocUpdater {
             LOGGER.debug("Found {} documents", cursor.count());
             ctx.getFactory().getInterceptors().callInterceptors(InterceptPoint.POST_CRUD_UPDATE_RESULTSET, ctx);
             // read-update-write
-            int numUpdating = 0;
+            BulkWriteOperation bwo = collection.initializeUnorderedBulkOperation();
             measure.begin("iteration");
             while (cursor.hasNext()) {
                 DBObject document = cursor.next();
@@ -172,18 +172,13 @@ public class IterateAndUpdate implements DocUpdater {
                                 throw new RuntimeException("Error populating document: \n" + updatedObject);
                             }
                             measure.end("populateHiddenFields");
-
+                            // Use bulk update here because it provides the replaceOne API
                             bwo.find(new BasicDBObject("_id", document.get("_id"))).replaceOne(updatedObject);
                             docUpdateAttempts.add(doc);
-                            numUpdating++;
-                            // update in batches
-                            if (numUpdating >= batchSize) {
-                                measure.begin("bulkUpdate");
-                                executeAndLogBulkErrors(bwo);
-                                measure.end("bulkUpdate");
-                                bwo = collection.initializeUnorderedBulkOperation();
-                                numUpdating = 0;
-                            }
+                            measure.begin("singleUpdate");
+                            executeAndLogBulkErrors(bwo);
+                            measure.end("singleUpdate");
+                            bwo = collection.initializeUnorderedBulkOperation();
                             doc.setCRUDOperationPerformed(CRUDOperation.UPDATE);
                             doc.setUpdatedDocument(doc);
                         } catch (Exception e) {
@@ -206,14 +201,6 @@ public class IterateAndUpdate implements DocUpdater {
                 docIndex++;
             }
             measure.end("iteration");
-            // if we have any remaining items to update
-            if (numUpdating > 0) {
-                try {
-                    executeAndLogBulkErrors(bwo);
-                } catch (Exception e) {
-                    LOGGER.warn("Update exception for documents for query: {}", query.toString());
-                }
-            }
         } finally {
             if (cursor != null) {
                 cursor.close();
@@ -229,7 +216,7 @@ public class IterateAndUpdate implements DocUpdater {
         // number failed is the number of update attempts that failed along with documents that failed pre-update
         response.setNumFailed(docUpdateErrors.size() + numFailed);
         response.setNumMatched(numMatched);
-        METRICS.info("IterateAndUpdate:\n{}",measure);
+        METRICS.info("{}",measure);
     }
 
     private void handleBulkWriteError(List<BulkWriteError> errors, List<DocCtx> docs) {
