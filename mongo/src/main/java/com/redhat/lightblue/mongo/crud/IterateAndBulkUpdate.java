@@ -171,11 +171,7 @@ public class IterateAndBulkUpdate implements DocUpdater {
                             merge.merge(document, updatedObject);
                             measure.end("toBsonAndMerge");
                             measure.begin("populateHiddenFields");
-                            try {
-                                Translator.populateDocHiddenFields(updatedObject, md);
-                            } catch (IOException e) {
-                                throw new RuntimeException("Error populating document: \n" + updatedObject);
-                            }
+                            Translator.populateDocHiddenFields(updatedObject, md);
                             measure.end("populateHiddenFields");
 
                             bwo.find(new BasicDBObject("_id", document.get("_id"))).replaceOne(updatedObject);
