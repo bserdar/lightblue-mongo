@@ -44,6 +44,8 @@ import com.mongodb.MongoException;
 import com.mongodb.MongoExecutionTimeoutException;
 import com.mongodb.MongoSocketException;
 import com.mongodb.MongoTimeoutException;
+import com.redhat.lightblue.AsynchRequest;
+import com.redhat.lightblue.AsynchResponse;
 import com.redhat.lightblue.config.ControllerConfiguration;
 import com.redhat.lightblue.crud.CRUDController;
 import com.redhat.lightblue.crud.CRUDDeleteResponse;
@@ -64,6 +66,9 @@ import com.redhat.lightblue.eval.Updater;
 import com.redhat.lightblue.extensions.Extension;
 import com.redhat.lightblue.extensions.ExtensionSupport;
 import com.redhat.lightblue.extensions.synch.LockingSupport;
+import com.redhat.lightblue.extensions.asynch.AsynchronousExecutionSupport;
+import com.redhat.lightblue.extensions.asynch.AsynchronousExecutionConfiguration;
+import com.redhat.lightblue.extensions.asynch.AsynchronousJob;
 import com.redhat.lightblue.extensions.valuegenerator.ValueGeneratorSupport;
 import com.redhat.lightblue.interceptor.InterceptPoint;
 import com.redhat.lightblue.metadata.EntityInfo;
@@ -83,6 +88,8 @@ import com.redhat.lightblue.metadata.types.StringType;
 import com.redhat.lightblue.mongo.common.DBResolver;
 import com.redhat.lightblue.mongo.common.MongoDataStore;
 import com.redhat.lightblue.mongo.config.MongoConfiguration;
+import com.redhat.lightblue.config.LightblueFactory;
+import com.redhat.lightblue.config.LightblueFactoryAware;
 import com.redhat.lightblue.mongo.metadata.MongoMetadataConstants;
 import com.redhat.lightblue.query.FieldProjection;
 import com.redhat.lightblue.query.Projection;
@@ -94,7 +101,12 @@ import com.redhat.lightblue.util.Error;
 import com.redhat.lightblue.util.JsonDoc;
 import com.redhat.lightblue.util.Path;
 
-public class MongoCRUDController implements CRUDController, MetadataListener, ExtensionSupport, ExplainQuerySupport {
+public class MongoCRUDController implements CRUDController,
+                                            LightblueFactoryAware,
+                                            MetadataListener,
+                                            ExtensionSupport,
+                                            ExplainQuerySupport,
+                                            AsynchronousExecutionSupport {
 
     public static final String ID_STR = "_id";
 
@@ -135,15 +147,19 @@ public class MongoCRUDController implements CRUDController, MetadataListener, Ex
 
     private final DBResolver dbResolver;
     private final ControllerConfiguration controllerCfg;
+    private LightblueFactory lbFactory;
 
     private final int batchSize;
     private final ConcurrentModificationDetectionCfg concurrentModificationDetection;
+
+    private final MongoAsynchronousExecutionSupport asynchImpl;
 
     public MongoCRUDController(ControllerConfiguration controllerCfg, DBResolver dbResolver) {        
         this.dbResolver = dbResolver;
         this.controllerCfg = controllerCfg;
         this.batchSize=getIntOption("updateBatchSize",64);
         this.concurrentModificationDetection=new ConcurrentModificationDetectionCfg(controllerCfg);
+        this.asynchImpl=new MongoAsynchronousExecutionSupport(dbResolver);
     }
     
     private String getOption(String optionName,String defaultValue) {
@@ -187,6 +203,33 @@ public class MongoCRUDController implements CRUDController, MetadataListener, Ex
     public ControllerConfiguration getControllerConfiguration() {
         return controllerCfg;
     }
+
+    @Override
+    public void setLightblueFactory(LightblueFactory factory) {
+        this.lbFactory=factory;
+        asynchImpl.setLightblueFactory(factory);
+    }
+
+    @Override
+    public AsynchResponse scheduleAsynchronousExecution(AsynchRequest request) {
+        return asynchImpl.scheduleAsynchronousExecution(request);
+    }
+
+    @Override
+    public AsynchResponse getAsynchronousExecutionStatus(String jobId) {
+        return asynchImpl.getAsynchronousExecutionStatus(jobId);
+    }
+
+    @Override
+    public AsynchronousJob getAndLockNextAsynchronousJob() {
+        return asynchImpl.getAndLockNextAsynchronousJob();
+    }
+
+    @Override
+    public void completeJob(AsynchronousJob job) {
+        asynchImpl.completeJob(job);
+    }
+
 
     /**
      * Insertion operation for mongo

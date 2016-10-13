@@ -1,4 +1,11 @@
 {
+    "asynchronousExecutions": {
+        "backend":"mongo",
+        "options":{
+            "datasource":"mongo",
+            "collection":"asynch"
+        }
+    },
    "controllers" : [
       {
           "backend" : "mongo",

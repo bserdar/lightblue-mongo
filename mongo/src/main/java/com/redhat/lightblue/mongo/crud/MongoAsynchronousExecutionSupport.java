@@ -22,8 +22,16 @@ import java.util.Date;
 import java.util.Set;
 import java.util.concurrent.CopyOnWriteArraySet;
 
+import java.io.IOException;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import org.bson.types.ObjectId;
+
 import com.mongodb.BasicDBObject;
 import com.mongodb.DB;
+import com.mongodb.DBCursor;
 import com.mongodb.DBObject;
 import com.mongodb.DBCollection;
 import com.mongodb.ReadPreference;
@@ -42,6 +50,7 @@ import com.redhat.lightblue.crud.SaveRequest;
 import com.redhat.lightblue.crud.DeleteRequest;
 import com.redhat.lightblue.crud.InsertionRequest;
 import com.redhat.lightblue.crud.BulkRequest;
+import com.redhat.lightblue.crud.BulkResponse;
 import com.redhat.lightblue.crud.CRUDOperation;
 
 import com.redhat.lightblue.config.LightblueFactory;
@@ -52,6 +61,7 @@ import com.redhat.lightblue.extensions.asynch.AsynchronousExecutionConfiguration
 import com.redhat.lightblue.extensions.asynch.AsynchronousJob;
 
 import com.redhat.lightblue.mongo.common.MongoDataStore;
+import com.redhat.lightblue.mongo.common.DBResolver;
 
 import com.redhat.lightblue.util.JsonUtils;
 import com.redhat.lightblue.util.Error;
@@ -75,11 +85,14 @@ import com.redhat.lightblue.util.Error;
  */
 public class MongoAsynchronousExecutionSupport implements AsynchronousExecutionSupport, LightblueFactoryAware {
 
+    private final DBResolver resolver;
     private LightblueFactory lbFactory;
     private AsynchronousExecutionConfiguration cfg;
     private DBCollection collection;
 
     public static final int SEGMENT_LENGTH=1000000;
+
+    private static final Logger LOGGER=LoggerFactory.getLogger(MongoAsynchronousExecutionSupport.class);
 
     private static Set<String> initializedCollections = new CopyOnWriteArraySet<>();
 
@@ -95,8 +108,8 @@ public class MongoAsynchronousExecutionSupport implements AsynchronousExecutionS
 
         public DBObject toBson() {
             BasicDBObject doc=new BasicDBObject();
-            append(doc,"_id",jobId);
-            append(doc,"asyncStatus",status);
+            append(doc,"_id",jobId!=null?new ObjectId(jobId):null);
+            append(doc,"status",status);
             append(doc,"priority",new Integer(priority));
             append(doc,"createdTime",createdTime);
             append(doc,"scheduledTime",scheduledTime);
@@ -131,7 +144,7 @@ public class MongoAsynchronousExecutionSupport implements AsynchronousExecutionS
 
         public DBObject toBson() {
             BasicDBObject doc=new BasicDBObject();
-            append(doc,"requestOwner",requestOwner);
+            append(doc,"requestOwner",requestOwner!=null?new ObjectId(requestOwner):null);
             if(requestData!=null) {
                 append(doc,"requestData",requestData.toJson().toString());
                 append(doc,"op",requestData.getOperation().toString());
@@ -141,7 +154,7 @@ public class MongoAsynchronousExecutionSupport implements AsynchronousExecutionS
             return doc;
         }
 
-        public static JobRequestData fromBson(DBObject doc) {
+        public static JobRequestData fromBson(DBObject doc) throws IOException {
             JobRequestData ret=new JobRequestData();
             if(doc!=null) {
                 ret.requestOwner=doc.get("requestOwner").toString();
@@ -180,7 +193,7 @@ public class MongoAsynchronousExecutionSupport implements AsynchronousExecutionS
 
         public DBObject toBson() {
             BasicDBObject doc=new BasicDBObject();
-            append(doc,"responseOwner",responseOwner);
+            append(doc,"responseOwner",responseOwner!=null?new ObjectId(responseOwner):null);
             append(doc,"seq",seq);
             append(doc,"bulk",bulk);
             append(doc,"data",data);
@@ -208,6 +221,10 @@ public class MongoAsynchronousExecutionSupport implements AsynchronousExecutionS
             obj.append(name,value);
         return obj;
     }
+
+    public MongoAsynchronousExecutionSupport(DBResolver resolver) {
+        this.resolver=resolver;
+    }
                 
     public void init(DBCollection coll) {
         // Make sure we have our indexes
@@ -220,7 +237,7 @@ public class MongoAsynchronousExecutionSupport implements AsynchronousExecutionS
             keys=new BasicDBObject("responseOwner",1).append("seq",1);
             coll.createIndex(keys,options);
 
-            keys=new BasicDBObject("asynchStatus",1).append("scheduledDate",-1);
+            keys=new BasicDBObject("status",1).append("scheduledDate",-1);
             coll.createIndex(keys,options);
         }
     }
@@ -228,7 +245,6 @@ public class MongoAsynchronousExecutionSupport implements AsynchronousExecutionS
     @Override
     public void setLightblueFactory(LightblueFactory factory) {
         this.lbFactory=factory;
-        this.cfg=lbFactory.getFactory().getAsynchronousExecutionConfiguration();
     }
 
     @Override
@@ -259,6 +275,7 @@ public class MongoAsynchronousExecutionSupport implements AsynchronousExecutionS
             requestData.requestOwner=response.getJobId();
             coll.insert(requestData.toBson());
         } catch (Exception e) {
+            LOGGER.error("Error during schedule:{}",e,e);
             throw Error.get(MongoCrudConstants.ERR_ASYNCH_SCHEDULING,e.toString());
         }
 
@@ -268,69 +285,101 @@ public class MongoAsynchronousExecutionSupport implements AsynchronousExecutionS
     @Override
     public AsynchResponse getAsynchronousExecutionStatus(String jobId) {
         DBCollection coll=getJobStore();
-
-        JobRecord jobDoc=new JobRecord();
-        jobDoc.jobId=jobId;
-        DBObject q=jobDoc.toBson();
-        DBObject doc=coll.findOne(q,new BasicDBObject(),ReadPreference.primary());
-        if(doc!=null) {
-            AsynchResponse response=new AsynchResponse();
-            jobDoc=JobRecord.fromBson(doc);
-            response.setJobId(jobDoc.jobId);
-            response.setPriority(jobDoc.priority);
-            response.setScheduledTime(jobDoc.scheduledTime);
-            response.setExecutionStartTime(jobDoc.executionStartTime);
-            response.setCompletionTime(jobDoc.completionTime);
-            response.setTimeoutTime(jobDoc.timeoutTime);
-            response.setAsynchStatus(AsynchStatus.valueOf(jobDoc.status));
-            if(AsynchStatus.completed.toString().equals(jobDoc.status)) {
-                coll.remove(q);
-                coll.remove(new BasicDBObject("requestOwner",jobId));
-                buildResponseData(coll,jobId,response);
-                coll.remove(new BasicDBObject("responseOwner",jobId));
-            } else if(AsynchStatus.timedout.toString().equals(jobDoc.status)) {
-                coll.remove(q);
-                coll.remove(new BasicDBObject("requestOwner",jobId));
-                coll.remove(new BasicDBObject("responseOwner",jobId));
+        try {
+            DBObject q=new BasicDBObject("_id",new ObjectId(jobId));
+            DBObject doc=coll.findOne(q,new BasicDBObject(),ReadPreference.primary());
+            if(doc!=null) {
+                AsynchResponse response=new AsynchResponse();
+                JobRecord jobDoc=JobRecord.fromBson(doc);
+                response.setJobId(jobDoc.jobId);
+                response.setPriority(jobDoc.priority);
+                response.setScheduledTime(jobDoc.scheduledTime);
+                response.setExecutionStartTime(jobDoc.executionStartTime);
+                response.setCompletionTime(jobDoc.completionTime);
+                response.setTimeoutTime(jobDoc.timeoutTime);
+                response.setAsynchStatus(AsynchStatus.valueOf(jobDoc.status));
+                if(AsynchStatus.completed.toString().equals(jobDoc.status)) {
+                    coll.remove(q);
+                    coll.remove(new BasicDBObject("requestOwner",jobId));
+                    Object data=getResponseData(coll,jobId);
+                    if(data instanceof BulkResponse)
+                        response.setBulkResponse((BulkResponse)data);
+                    else
+                        response.setResponse((Response)data);
+                    coll.remove(new BasicDBObject("responseOwner",jobId));
+                } else if(AsynchStatus.timedout.toString().equals(jobDoc.status)) {
+                    coll.remove(q);
+                    coll.remove(new BasicDBObject("requestOwner",jobId));
+                    coll.remove(new BasicDBObject("responseOwner",jobId));
+                }
+                return response;
+            } else {
+                return null;
             }
-            return response;
-        } else {
-            return null;
+        } catch(Exception e) {
+            LOGGER.error("Error during getStatus:{}",e,e);
+            throw Error.get(MongoCrudConstants.ERR_ASYNCH_SCHEDULING,e.toString());
         }
+    }
+
+    private Object getResponseData(DBCollection coll,
+                                   String jobId) throws IOException {
+        DBCursor cursor=coll.find(new BasicDBObject("responseOwner",new ObjectId(jobId)));
+        cursor.setReadPreference(ReadPreference.primary());
+        cursor.sort(new BasicDBObject("seq",1));
+        StringBuilder str=new StringBuilder();
+        boolean bulk=false;
+        boolean first=true;
+        while(cursor.hasNext()) {
+            DBObject doc=cursor.next();
+            JobResponseData data=JobResponseData.fromBson(doc);
+            str.append(data.data);
+            if(first) {
+                first=false;
+                bulk=data.bulk;
+            }
+        }
+        return bulk?BulkResponse.fromJson(JsonUtils.json(str.toString())):
+            Response.fromJson(JsonUtils.json(str.toString()));
     }
 
     @Override
     public AsynchronousJob getAndLockNextAsynchronousJob() {
         DBCollection coll=getJobStore();
-        Date now=new Date();
-        DBObject q=new BasicDBObject("asynchStatus",AsynchStatus.scheduled.toString()).
-            append("scheduledTime",new BasicDBObject("$lte",now));
-        DBObject s=new BasicDBObject("priority","-1");
-        DBObject u=new BasicDBObject("$set",
-                                     new BasicDBObject("asynchStatus",AsynchStatus.executing.toString()).
-                                     append("executionStartTime",now));
-        DBObject doc=coll.findAndModify(q,new BasicDBObject(),s,false,u,true,false);
-        if(doc!=null) {
-            AsynchronousJob ret=new AsynchronousJob();
-            JobRecord jobDoc=JobRecord.fromBson(doc);
-            ret.jobId=jobDoc.jobId;
-            ret.priority=jobDoc.priority;
-            ret.createdTime=jobDoc.createdTime;
-            ret.scheduledTime=jobDoc.scheduledTime;
-            ret.executionStartTime=jobDoc.executionStartTime;
-            ret.asynchStatus=AsynchStatus.valueOf(jobDoc.status);
-
-            DBObject reqDoc=coll.findOne(new BasicDBObject("requestOwner",jobDoc.jobId),new BasicDBObject(),ReadPreference.primary());
-            JobRequestData reqData=JobRequestData.fromBson(reqDoc);
-            if(reqData.requestData!=null) {
-                ret.singleData=new AsynchronousJob.SingleRequestData();
-                ret.singleData.request=reqData.requestData;
-            } else {
-                ret.bulkData=new AsynchronousJob.BulkRequestData();
-                ret.bulkData.request=reqData.bulkRequestData;
+        try {
+            Date now=new Date();
+            DBObject q=new BasicDBObject("status",AsynchStatus.scheduled.toString()).
+                append("scheduledTime",new BasicDBObject("$lte",now));
+            DBObject s=new BasicDBObject("priority",1);
+            DBObject u=new BasicDBObject("$set",
+                                         new BasicDBObject("status",AsynchStatus.executing.toString()).
+                                         append("executionStartTime",now));
+            DBObject doc=coll.findAndModify(q,new BasicDBObject(),s,false,u,true,false);
+            if(doc!=null) {
+                AsynchronousJob ret=new AsynchronousJob();
+                JobRecord jobDoc=JobRecord.fromBson(doc);
+                ret.jobId=jobDoc.jobId;
+                ret.priority=jobDoc.priority;
+                ret.createdTime=jobDoc.createdTime;
+                ret.scheduledTime=jobDoc.scheduledTime;
+                ret.executionStartTime=jobDoc.executionStartTime;
+                ret.asynchStatus=AsynchStatus.valueOf(jobDoc.status);
+                
+                DBObject reqDoc=coll.findOne(new BasicDBObject("requestOwner",new ObjectId(jobDoc.jobId)),new BasicDBObject(),ReadPreference.primary());
+                JobRequestData reqData=JobRequestData.fromBson(reqDoc);
+                if(reqData.requestData!=null) {
+                    ret.singleData=new AsynchronousJob.SingleRequestData();
+                    ret.singleData.request=reqData.requestData;
+                } else {
+                    ret.bulkData=new AsynchronousJob.BulkRequestData();
+                    ret.bulkData.request=reqData.bulkRequestData;
+                }
+                
+                return ret;
             }
-            
-            return ret;
+        } catch(Exception e) {
+            LOGGER.error("Error during getAndLock:{}",e,e);
+            throw Error.get(MongoCrudConstants.ERR_ASYNCH_SCHEDULING,e.toString());
         }
         return null;
     }
@@ -340,7 +389,7 @@ public class MongoAsynchronousExecutionSupport implements AsynchronousExecutionS
         DBCollection coll=getJobStore();
 
         String response=null;
-        boolean bulk;
+        boolean bulk=false;
         if(job.singleData!=null&&job.singleData.response!=null) {
             response=job.singleData.response.toJson().toString();
             bulk=false;
@@ -364,8 +413,8 @@ public class MongoAsynchronousExecutionSupport implements AsynchronousExecutionS
                 len-=n;
             }
         }
-        coll.findAndModify(new BasicDBObject("_id",job.jobId),
-                           new BasicDBObject("$set",new BasicDBObject("asynchStatus",AsynchStatus.completed.toString()).
+        coll.findAndModify(new BasicDBObject("_id",new ObjectId(job.jobId)),
+                           new BasicDBObject("$set",new BasicDBObject("status",AsynchStatus.completed.toString()).
                                              append("completionTime",new Date())));
                            
     }
@@ -374,6 +423,11 @@ public class MongoAsynchronousExecutionSupport implements AsynchronousExecutionS
         if(collection!=null)
             return collection;
         
+        try {
+            this.cfg=lbFactory.getFactory().getAsynchronousExecutionConfiguration();
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
         String msg=null;
         if(cfg.getOptions()!=null) {
             MongoDataStore store=new MongoDataStore();
