@@ -223,4 +223,46 @@ public class AssocTest extends AbstractMongoCrudTest {
         cleanup_arr();
     }
 
+    @Test
+    public void self_ref_bad_q() throws Exception {
+        // Fill with some data
+        DocTranslator translator=new DocTranslator(new MDResolver(),JsonNodeFactory.instance);
+        JsonDoc doc=new JsonDoc(JsonNodeFactory.instance.objectNode());
+        doc.modify(new Path("objectType"),JsonNodeFactory.instance.textNode("containerImage"),true);
+        doc.modify(new Path("parsed_data.rpm_manifest.0.srpm_name"),JsonNodeFactory.instance.textNode("ansible"),true);
+        doc.modify(new Path("parsed_data.layers.0"),JsonNodeFactory.instance.textNode("layer0"),true);
+        doc.modify(new Path("parsed_data.layers.1"),JsonNodeFactory.instance.textNode("layer1"),true);
+        doc.modify(new Path("parsed_data.layers.2"),JsonNodeFactory.instance.textNode("layer2"),true);
+        doc.modify(new Path("parsed_data.layers.3"),JsonNodeFactory.instance.textNode("layer3"),true);
+        doc.modify(new Path("parsed_data.layers.4"),JsonNodeFactory.instance.textNode("layer4"),true);
+        doc.modify(new Path("repositories.0.registry"),JsonNodeFactory.instance.textNode("registry.access.redhat.com"),true);
+        doc.modify(new Path("repositories.1.registry"),JsonNodeFactory.instance.textNode("registry.access.redhat.com"),true);
+        doc.modify(new Path("repositories.0.repository"),JsonNodeFactory.instance.textNode("repo"),true);
+        doc.modify(new Path("repositories.1.repository"),JsonNodeFactory.instance.textNode("repo"),true);
+        db.getCollection("containerImage").insert(translator.toBson(doc).doc);
+
+        doc=new JsonDoc(JsonNodeFactory.instance.objectNode());
+        doc.modify(new Path("objectType"),JsonNodeFactory.instance.textNode("containerImage"),true);
+        doc.modify(new Path("parsed_data.layers.0"),JsonNodeFactory.instance.textNode("layer0"),true);
+        doc.modify(new Path("parsed_data.layers.1"),JsonNodeFactory.instance.textNode("layer11"),true);
+        doc.modify(new Path("parsed_data.layers.2"),JsonNodeFactory.instance.textNode("layer12"),true);
+        doc.modify(new Path("parsed_data.layers.3"),JsonNodeFactory.instance.textNode("layer13"),true);
+        doc.modify(new Path("parsed_data.layers.4"),JsonNodeFactory.instance.textNode("layer14"),true);
+        doc.modify(new Path("repositories.0.registry"),JsonNodeFactory.instance.textNode("registry.access.redhat.com"),true);
+        doc.modify(new Path("repositories.1.registry"),JsonNodeFactory.instance.textNode("registry.access.redhat.com"),true);
+        doc.modify(new Path("repositories.0.repository"),JsonNodeFactory.instance.textNode("repo"),true);
+        doc.modify(new Path("repositories.1.repository"),JsonNodeFactory.instance.textNode("repo"),true);
+        db.getCollection("containerImage").insert(translator.toBson(doc).doc);
+        
+        FindRequest fr=new FindRequest();
+        fr.setEntityVersion(new EntityVersion("containerImage","0.0.1"));
+        fr.setQuery(query("{'field':'parsed_data.rpm_manifest.*.srpm_name','op': '$in','values': ['ansible','atomic-openshift']}"));
+        fr.setProjection(projection("[{'field': 'base_images_red_hat.*','recursive':true},{'field':'*'}]"));
+        Response response=getMediator().find(fr);
+        System.out.println("Results:"+response.getEntityData());
+        Assert.assertEquals(1,response.getEntityData().size());
+        Assert.assertEquals(1,response.getEntityData().get(0).get("base_images_red_hat").size());
+
+    }
+
 }

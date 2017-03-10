@@ -1,0 +1,207 @@
+{
+    "entityInfo": {
+        "datastore": {
+            "backend": "mongo",
+            "collection": "containerImage"
+        },
+        "defaultVersion": "0.0.1",
+        "indexes": [
+            {
+                "fields": [
+                    {
+                        "caseInsensitive": false,
+                        "dir": "$asc",
+                        "field": "repositories.*.repository"
+                    },
+                    {
+                        "caseInsensitive": false,
+                        "dir": "$asc",
+                        "field": "repositories.*.registry"
+                    }
+                ],
+                "name": "containerImage_repositories_identity"
+            },
+            {
+                "fields": [
+                    {
+                        "caseInsensitive": false,
+                        "dir": "$asc",
+                        "field": "_id"
+                    }
+                ],
+                "name": null,
+                "unique": true
+            }
+        ],
+        "name": "containerImage"
+    },
+    "schema": {
+        "access": {
+            "delete": [
+                "anyone"
+            ],
+            "find": [
+                "anyone"
+            ],
+            "insert": [
+                "anyone"
+            ],
+            "update": [
+                "anyone"
+            ]
+        },
+        "fields": {
+            "_id": {
+                "type": "string",
+                "constraints": {
+                    "identity":true
+                }
+            },
+            "base_images_red_hat": {
+                "entity": "containerImage",
+                "query": {
+                    "$and": [
+                        {
+                            "field": "_id",
+                            "op": "$neq",
+                            "rfield": "$parent._id"
+                        },
+                        {
+                            "field": "repositories.*.registry",
+                            "op": "$eq",
+                            "rvalue": "registry.access.redhat.com"
+                        },
+                        {
+                            "field": "parsed_data.layers",
+                            "op": "$neq",
+                            "rvalue": null
+                        },
+                        {
+                            "array": "parsed_data.layers",
+                            "elemMatch": {
+                                "field": "$this",
+                                "op": "$in",
+                                "rfield": "$parent.$parent.$parent.parsed_data.layers"
+                            }
+                        }
+                    ]
+                },
+                "type": "reference"
+            },
+            "objectType": {
+                "access": {
+                    "find": [
+                        "anyone"
+                    ],
+                    "update": [
+                        "noone"
+                    ]
+                },
+                "constraints": {
+                    "minLength": 1,
+                    "required": true
+                },
+                "description": null,
+                "type": "string"
+            },
+            "parsed_data": {
+                "fields": {
+                    "rpm_manifest": {
+                        "description": "Content manifest of this image.  RPM content included in the image.",
+                        "items": {
+                            "fields": {
+                                "name": {
+                                    "description": "RPM name",
+                                    "type": "string"
+                                },
+                                "nvra": {
+                                    "constraints": {
+                                        "element-identity": true
+                                    },
+                                    "description": "RPM name, version, release, and architecture",
+                                    "type": "string"
+                                },
+                                "srpm_name": {
+                                    "description": "Source RPM name",
+                                    "type": "string"
+                                },
+                                "srpm_nevra": {
+                                    "description": "Source RPM NEVRA (name, epoch, version, release, architecture)",
+                                    "type": "string"
+                                }
+                            },
+                            "type": "object"
+                        },
+                        "type": "array"
+                    },
+                    "rpm_manifest#": {
+                        "access": {
+                            "find": [
+                                "anyone"
+                            ]
+                        },
+                        "description": null,
+                        "type": "integer"
+                    },
+                    "image_id": {
+                        "description": null,
+                        "type": "string"
+                    },
+                    "layers": {
+                        "items": {
+                            "type": "string"
+                        },
+                        "type": "array"
+                    },
+                    "layers#": {
+                        "access": {
+                            "find": [
+                                "anyone"
+                            ]
+                        },
+                        "description": null,
+                        "type": "integer"
+                    }
+                },
+                "type": "object"
+            },
+            "repositories": {
+                "type": "array",
+                "items": {
+                    "fields": {
+                        "registry": {
+                            "constraints": {
+                                "required": true
+                            },
+                            "type": "string"
+                        },
+                        "repository": {
+                            "constraints": {
+                                "required": true
+                            },
+                            "type": "string"
+                        }
+                    },
+                    "type": "object"
+                }
+            },
+            "repositories#": {
+                "access": {
+                    "find": [
+                        "anyone"
+                    ]
+                },
+                "description": null,
+                "type": "integer"
+            }
+        },
+        "name": "containerImage",
+        "status": {
+            "value": "active"
+        },
+        "version": {
+            "changelog": "test",
+            "value": "0.0.1"
+        }
+    }
+}
